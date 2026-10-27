@@ -20,16 +20,16 @@
 *,*::before,*::after{box-sizing:border-box}
 html,body{height:100%}
 body{
-  margin:0;overflow:hidden;background:var(--ground);
-  font-family:var(--serif);color:#F0EEE8;
+  margin:0;overflow:hidden;background:var(--ground);font-family:var(--serif);
   -webkit-font-smoothing:antialiased;-webkit-tap-highlight-color:transparent;
+  touch-action:manipulation;user-select:none;-webkit-user-select:none;
 }
-canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
+canvas{display:block;position:fixed;inset:0;width:100%;height:100%;outline:none}
 
 /* a little depth in the room */
 .vig{
   position:fixed;inset:0;pointer-events:none;z-index:2;
-  background:radial-gradient(120% 90% at 50% 44%, rgba(255,255,255,.03), rgba(0,0,0,.24) 84%);
+  background:radial-gradient(125% 95% at 50% 46%, rgba(0,0,0,0) 52%, rgba(0,0,0,.26) 100%);
 }
 
 /* if WebGL will not run, the letter still has to arrive */
@@ -39,12 +39,12 @@ canvas{display:block;position:fixed;inset:0;width:100%;height:100%}
 }
 body.plain-on .plain{display:block}
 .sheet{
-  max-width:430px;margin:0 auto;background:#FAF9F5;color:#222;
+  max-width:430px;margin:0 auto;background:#F7F5EF;color:#222;
   padding:46px 38px 42px;box-shadow:0 18px 40px rgba(0,0,0,.28);
 }
-.sheet h1{margin:0 0 26px;font-size:30px;font-weight:400;letter-spacing:-0.01em}
+.sheet h1{margin:0 0 26px;font-size:30px;font-weight:400;letter-spacing:-0.025em}
 .sheet img{display:block;width:100%;height:auto;margin:0 0 26px}
-.sheet p{margin:0;font-size:16px;line-height:1.45}
+.sheet p{margin:0;font-size:16px;line-height:1.45;letter-spacing:-0.012em}
 .sheet .sign{margin-top:26px;font-style:italic;color:#6E6E68}
 </style>
 </head>
@@ -68,142 +68,181 @@ body.plain-on .plain{display:block}
 "use strict";
 /* ==========================================================================
    For Kenta.
-   An envelope sits tilted on a grey field. Click it: it straightens, turns
-   over, the flap lifts, and a letter folded in thirds slides out and opens
-   along its creases. It leans toward whoever is looking.
+   A paper envelope on a tartan cloth, small creatures drifting over it.
+   Click: it lifts, turns over, the flap folds back, and a letter folded in
+   thirds slides out of the throat and opens along its creases.
    ========================================================================== */
 
-const PAPER  = "#FAF9F5";
-const GREY   = "#747370";          /* the envelope stock */
+const PAPER  = "#F7F5EF";
+const STOCK  = "#76756F";              /* the envelope */
 const GROUND = 0x6C8F72;
+const SERIF  = "'Times New Roman', Times, serif";
+const MONO   = "Menlo, Consolas, 'DejaVu Sans Mono', monospace";
 
-/* envelope, and the letter folded into three bands */
-const EW = 2.00, EH = 1.22, ED = .10;
-const LW = 1.88, LH = 2.52, BAND = LH / 3;
+/* envelope */
+const EW = 2.0, EH = 1.24, EB = .015;          /* width, height, how much it puffs */
+const FH = EH * .58, RF = .007;                 /* flap depth, flap crease radius   */
+/* letter, folded in thirds: the outer fold wraps the inner one */
+const LW = 1.88, LH = 2.52, B2 = LH / 6;
+const RT = .006, RB = .003;
+/* the cloth, and which way shadows drift per unit of height above it */
+const WALL = -.6, LX = .30, LY = -.38;
+const DUR = 5.4;
 
 const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const mix   = (a, b, t) => a + (b - a) * t;
+const ease  = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
+const seg   = (v, a, b) => ease(clamp((v - a) / (b - a), 0, 1));
 
-/* ---- the shirt: a tartan sett drawn warp over weft, softened ------------------ */
-function tartanTex(){
-  const S = 1024, c = document.createElement("canvas");
-  c.width = c.height = S;
-  const x = c.getContext("2d");
-  const G = "#52A86A", g = "#78BE84", B = "#5F8FE4", b = "#94B2EC",
-        W = "#F4EFE3", P = "#FF5C84", D = "#2F7350";
-  /* one half of the sett; it mirrors to tile */
+/* ---- type -------------------------------------------------------------------- */
+const hasLS = "letterSpacing" in CanvasRenderingContext2D.prototype;
+const textW = (x, s, tr) => x.measureText(s).width + tr * Math.max(0, s.length - 1);
+function drawText(x, s, left, y, tr){
+  if (hasLS){ x.letterSpacing = tr + "px"; x.fillText(s, left, y); x.letterSpacing = "0px"; return; }
+  /* keep the face's own kerning: each glyph sits at the width of all before it */
+  for (let i = 0; i < s.length; i++) x.fillText(s[i], left + x.measureText(s.slice(0, i)).width + tr * i, y);
+}
+function wrap(x, text, left, top, maxW, lh, tr){
+  let line = "", y = top;
+  for (const w of text.split(" ")){
+    const t = line ? line + " " + w : w;
+    if (textW(x, t, tr) > maxW && line){ drawText(x, line, left, y, tr); line = w; y += lh; }
+    else line = t;
+  }
+  if (line) drawText(x, line, left, y, tr);
+  return y;
+}
+
+/* ---- surfaces, drawn once ---------------------------------------------------- */
+function canvas(w, h){
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  return [c, c.getContext("2d")];
+}
+function grain(x, w, h, n, a){
+  for (let i = 0; i < n; i++){
+    x.fillStyle = (Math.random() < .5 ? "rgba(255,255,255," : "rgba(0,0,0,") + (Math.random() * a).toFixed(3) + ")";
+    x.fillRect(Math.random() * w, Math.random() * h, 1.4, 1.4);
+  }
+}
+
+/* a tartan sett, warp over weft, with a twill so it reads as cloth */
+function tartan(pal, veil){
+  const S = 1024, [c, x] = canvas(S, S);
+  const { G, g, B, b, W, P, D } = pal;
   const half = [[G,34],[W,5],[G,9],[g,6],[B,22],[P,3.5],[B,22],[g,6],[G,9],[W,5],[G,34],
                 [D,14],[B,16],[b,6],[W,4],[b,6],[B,16],[D,14]];
   const sett = half.concat(half.slice().reverse());
-  const total = sett.reduce((a, s) => a + s[1], 0), u = S / total;
-
-  const stripes = (vertical) => {
+  const u = S / sett.reduce((a, s) => a + s[1], 0);
+  const stripes = vertical => {
     let at = 0;
     for (const [col, w] of sett){
       x.fillStyle = col;
-      if (vertical) x.fillRect(at * u, 0, w * u + .6, S);
-      else          x.fillRect(0, at * u, S, w * u + .6);
+      if (vertical) x.fillRect(at * u, 0, w * u + .6, S); else x.fillRect(0, at * u, S, w * u + .6);
       at += w;
     }
   };
   stripes(true);
   x.globalAlpha = .52; stripes(false); x.globalAlpha = 1;
-
-  /* the twill: faint diagonals so it reads as cloth, not print */
-  x.strokeStyle = "rgba(255,255,255,.075)"; x.lineWidth = 1.2;
-  x.beginPath();
-  for (let d = -S; d < S * 2; d += 4){ x.moveTo(d, 0); x.lineTo(d - S, S); }
-  x.stroke();
+  x.lineWidth = 1.2;
+  x.strokeStyle = "rgba(255,255,255,.075)";
+  x.beginPath(); for (let d = -S; d < S * 2; d += 4){ x.moveTo(d, 0); x.lineTo(d - S, S); } x.stroke();
   x.strokeStyle = "rgba(0,0,0,.05)";
-  x.beginPath();
-  for (let d = -S + 2; d < S * 2; d += 4){ x.moveTo(d, 0); x.lineTo(d - S, S); }
-  x.stroke();
+  x.beginPath(); for (let d = -S + 2; d < S * 2; d += 4){ x.moveTo(d, 0); x.lineTo(d - S, S); } x.stroke();
+  if (veil){ x.fillStyle = veil; x.fillRect(0, 0, S, S); }
+  return c;
+}
+const CLOTH = { G:"#52A86A", g:"#78BE84", B:"#5F8FE4", b:"#94B2EC", W:"#F4EFE3", P:"#FF5C84", D:"#2F7350" };
+const LINER = { G:"#5E6E62", g:"#707E73", B:"#5E6A82", b:"#78839A", W:"#BDB8AC", P:"#A6727E", D:"#454F47" };
 
-  /* softened, so the letter stays the loudest thing on it */
-  x.fillStyle = "rgba(118,150,128,.09)"; x.fillRect(0, 0, S, S);
-
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.anisotropy = 8;
-  return t;
+function stock(w, h){
+  const [c, x] = canvas(w, h);
+  x.fillStyle = STOCK; x.fillRect(0, 0, w, h);
+  grain(x, w, h, w * h / 700, .045);
+  return [c, x];
 }
 
-/* ---- the two faces of the envelope, drawn once ----------------------------- */
-function envCanvas(draw){
-  const c = document.createElement("canvas");
-  c.width = 1536; c.height = Math.round(1536 * EH / EW);
-  const x = c.getContext("2d");
-  x.fillStyle = GREY; x.fillRect(0, 0, c.width, c.height);
-  draw(x, c.width, c.height);
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-function frontTex(){
-  return envCanvas((x, w, h) => {
-    x.fillStyle = "#F3F1EC";
-    x.font = "84px 'Times New Roman', Times, serif";
-    x.textAlign = "center"; x.textBaseline = "middle";
-    x.fillText("For Kenta", w / 2, h / 2 + 4);
-  });
-}
-/* the back carries the seams of the side and bottom folds */
-function backTex(){
-  return envCanvas((x, w, h) => {
-    const ax = w / 2, ay = h * .60;
-    x.lineWidth = 2.5; x.strokeStyle = "rgba(0,0,0,.17)";
-    x.beginPath();
-    x.moveTo(0, 0); x.lineTo(ax, ay); x.moveTo(w, 0); x.lineTo(ax, ay);
-    x.moveTo(0, h); x.lineTo(ax, ay); x.moveTo(w, h); x.lineTo(ax, ay);
-    x.stroke();
-    x.lineWidth = 1.5; x.strokeStyle = "rgba(255,255,255,.11)";
-    x.beginPath();
-    x.moveTo(0, 3); x.lineTo(ax, ay + 3); x.moveTo(w, 3); x.lineTo(ax, ay + 3);
-    x.stroke();
-  });
+function envFront(){
+  const [c, x] = stock(2048, Math.round(2048 * EH / EW));
+  x.font = "104px " + SERIF;
+  x.fillStyle = "#F4F2EC";
+  x.textBaseline = "middle";
+  const s = "For Kenta", tr = -3.2;
+  drawText(x, s, c.width / 2 - textW(x, s, tr) / 2, c.height / 2 + 6, tr);
+  return c;
 }
 
-/* ---- the letter itself ------------------------------------------------------ */
-function wrap(x, text, left, top, maxW, lh){
-  const words = text.split(" ");
-  let line = "", y = top;
-  for (const word of words){
-    const test = line ? line + " " + word : word;
-    if (x.measureText(test).width > maxW && line){
-      x.fillText(line, left, y); line = word; y += lh;
-    } else line = test;
-  }
-  if (line) x.fillText(line, left, y);
-  return y;
+/* the back: side flaps and a bottom flap; the throat between them is left
+   open (transparent), so whatever is inside shows through it */
+const FLAPS = (W, H) => {
+  const ax = W * .515, ay = H * .56, bx = W - ax;
+  return [
+    x => { x.beginPath(); x.moveTo(0, -4); x.lineTo(ax - 46, ay - 30);
+           x.quadraticCurveTo(ax, ay, ax - 46, ay + 30); x.lineTo(0, H + 4); x.closePath(); },
+    x => { x.beginPath(); x.moveTo(W, -4); x.lineTo(bx + 46, ay - 30);
+           x.quadraticCurveTo(bx, ay, bx + 46, ay + 30); x.lineTo(W, H + 4); x.closePath(); },
+    x => { x.beginPath(); x.moveTo(-4, H + 4);
+           x.quadraticCurveTo(W * .25, H * .55, W * .5 - 54, H * .41);
+           x.quadraticCurveTo(W * .5, H * .385, W * .5 + 54, H * .41);
+           x.quadraticCurveTo(W * .75, H * .55, W + 4, H + 4); x.closePath(); }
+  ];
+};
+function envMask(){
+  const W = 1024, H = Math.round(1024 * EH / EW), [c, x] = canvas(W, H);
+  x.fillStyle = "#000"; x.fillRect(0, 0, W, H);
+  x.fillStyle = "#fff";
+  for (const path of FLAPS(W, H)){ path(x); x.fill(); }
+  return c;
+}
+function envBack(){
+  const W = 2048, H = Math.round(2048 * EH / EW), [c, x] = canvas(W, H);
+
+  const layer = (path, tint) => {
+    x.save();
+    x.shadowColor = "rgba(0,0,0,.32)"; x.shadowBlur = 24; x.shadowOffsetX = 2; x.shadowOffsetY = 7;
+    x.fillStyle = STOCK; path(); x.fill();
+    x.restore();
+    x.save(); path(); x.clip();
+    x.fillStyle = tint; x.fillRect(0, 0, W, H);
+    x.restore();
+    x.save(); path();
+    x.strokeStyle = "rgba(255,255,255,.10)"; x.lineWidth = 2; x.stroke();
+    x.restore();
+  };
+  const [left, right, bottom] = FLAPS(W, H);
+  layer(() => left(x),   "rgba(0,0,0,.05)");      /* screen-right once turned over */
+  layer(() => right(x),  "rgba(255,255,255,.04)");
+  layer(() => bottom(x), "rgba(255,255,255,.015)");
+  x.globalCompositeOperation = "source-atop";
+  grain(x, W, H, W * H / 900, .04);
+  x.globalCompositeOperation = "source-over";
+  return c;
 }
 
-function letterTex(photo){
-  const c = document.createElement("canvas");
-  c.width = 1400; c.height = Math.round(1400 * LH / LW);
-  const x = c.getContext("2d"), W = c.width, H = c.height;
-  x.scale(1400 / 1100, 1400 / 1100);          /* lay out at the old size, draw sharper */
-  const W0 = 1100, H0 = Math.round(1100 * LH / LW);
+function letterSheet(photo){
+  const W0 = 1100, H0 = Math.round(W0 * LH / LW), S = 1600 / W0;
+  const [c, x] = canvas(1600, Math.round(H0 * S));
+  x.scale(S, S);
   x.fillStyle = PAPER; x.fillRect(0, 0, W0, H0);
   const g = x.createLinearGradient(0, 0, W0 * .4, H0);
-  g.addColorStop(0, "rgba(255,255,255,.55)");
-  g.addColorStop(1, "rgba(206,202,190,.30)");
+  g.addColorStop(0, "rgba(255,255,255,.5)"); g.addColorStop(1, "rgba(206,202,190,.26)");
   x.fillStyle = g; x.fillRect(0, 0, W0, H0);
-  for (let i = 0; i < 2600; i++){
-    x.fillStyle = "rgba(120,116,104," + (Math.random() * .045).toFixed(3) + ")";
-    x.fillRect(Math.random() * W0, Math.random() * H0, 1.3, 1.3);
+  for (let i = 0; i < 2800; i++){
+    x.fillStyle = "rgba(120,116,104," + (Math.random() * .04).toFixed(3) + ")";
+    x.fillRect(Math.random() * W0, Math.random() * H0, 1.2, 1.2);
   }
 
-  const M = 108, colW = W0 - M * 2;
-
-  x.fillStyle = "#222222";
+  const M = 112, col = W0 - M * 2;
   x.textBaseline = "alphabetic";
-  x.font = "84px 'Times New Roman', Times, serif";
-  x.fillText("Happy birthday", M, 236);
+  x.fillStyle = "#1F1F1E";
+  x.font = "92px " + SERIF;
+  drawText(x, "Happy birthday", M - 3, 236, -2.8);
 
   if (photo){
-    const pw = colW, ph = pw * (photo.height / photo.width), py = 332;
+    const pw = col, ph = pw * photo.height / photo.width, py = 330;
     x.save();
-    x.shadowColor = "rgba(0,0,0,.22)"; x.shadowBlur = 16; x.shadowOffsetY = 5;
+    x.shadowColor = "rgba(0,0,0,.18)"; x.shadowBlur = 14; x.shadowOffsetY = 4;
     x.fillStyle = "#fff"; x.fillRect(M, py, pw, ph);
     x.restore();
     x.drawImage(photo, M, py, pw, ph);
@@ -211,259 +250,515 @@ function letterTex(photo){
     x.strokeRect(M + .5, py + .5, pw - 1, ph - 1);
   }
 
-  x.fillStyle = "#222222";
-  x.font = "40px 'Times New Roman', Times, serif";
-  const end = wrap(x, "we’ve been given the gift of changing the world, not everyone is able to realise it, we can be so great, so let’s be so great", M, 1046, colW, 58);
+  x.fillStyle = "#1F1F1E";
+  x.font = "42px " + SERIF;
+  const end = wrap(x, "we’ve been given the gift of changing the world, not everyone is able to realise it, we can be so great, so let’s be so great",
+                   M, 1052, col, 58, -.7);
+  x.fillStyle = "#6A6963";
+  x.font = "italic 42px " + SERIF;
+  drawText(x, "love you, K", M, end + 100, -.5);
 
-  x.fillStyle = "#6E6E68";
-  x.font = "italic 40px 'Times New Roman', Times, serif";
-  x.fillText("love you, K", M, end + 98);
-
-  /* the creases, where the thirds meet */
-  for (const y of [H0 / 3, (H0 * 2) / 3]){
-    const v = x.createLinearGradient(0, y - 9, 0, y + 9);
-    v.addColorStop(0,   "rgba(255,255,255,0)");
-    v.addColorStop(.42, "rgba(255,255,255,.58)");
-    v.addColorStop(.52, "rgba(108,104,94,.20)");
-    v.addColorStop(.62, "rgba(255,255,255,.34)");
-    v.addColorStop(1,   "rgba(255,255,255,0)");
-    x.fillStyle = v; x.fillRect(0, y - 9, W0, 18);
+  /* the creases remember being folded */
+  for (const y of [H0 / 3, H0 * 2 / 3]){
+    const v = x.createLinearGradient(0, y - 7, 0, y + 7);
+    v.addColorStop(0, "rgba(255,255,255,0)"); v.addColorStop(.45, "rgba(255,255,255,.45)");
+    v.addColorStop(.53, "rgba(108,104,94,.14)"); v.addColorStop(1, "rgba(255,255,255,0)");
+    x.fillStyle = v; x.fillRect(0, y - 7, W0, 14);
   }
-
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
+  return c;
 }
 
-/* ---- scene ------------------------------------------------------------------ */
-let renderer, scene, camera, env, flapPivot, letter, topPivot, botPivot, started = false;
-let p = 0, dir = 0, last = 0;
-const DUR = 6.0;
+/* a soft shadow: a blurred rectangle filling the middle half of the canvas */
+function softRect(){
+  const S = 256, [c, x] = canvas(S, S);
+  x.shadowColor = "#000"; x.shadowBlur = 30; x.shadowOffsetX = 4000;
+  x.fillStyle = "#000";
+  x.fillRect(64 - 4000, 64, 128, 128);
+  return c;
+}
 
-const ease = t => t < .5 ? 4*t*t*t : 1 - Math.pow(-2*t + 2, 3) / 2;
-const seg  = (v, a, b) => ease(Math.min(1, Math.max(0, (v - a) / (b - a))));
-const mix  = (a, b, t) => a + (b - a) * t;
+/* ---- the creatures ------------------------------------------------------------ */
+const CRITTERS = [
+String.raw`(o)____(o)
+( -  _  - )
+ \_______/
+   ~   ~`,
+String.raw`(@)____(@)
+ ( . A . )
+  \_____/`,
+String.raw` .-''''-.
+( ^    ^ )
+ \  -   /
+  '....'`,
+String.raw` ____
+/ O  \
+| -   |
+\____/
+ /  \ `,
+String.raw`\|/|/\|
+ (o o)
+( =v= )
+ "   "`,
+String.raw` .-^-.
+( @_@ )
+ )   (
+ '-.-'`,
+String.raw`.~~~.
+( > < )
+ ( o )
+  " "`,
+String.raw` /\_/\
+( u.u )
+/  ~  \
+(_)-(_)`,
+String.raw` .    .
+(-)  (-)
+(   w  )
+ \____/`,
+String.raw`(O)____(O)
+( o  o  o )
+ \________/
+  ~  ~  ~`,
+String.raw`(o  o)
+( ww )
+/|/\|\ `,
+String.raw`.-----.
+( -   - )
+(  ( )  )
+ '-----'`,
+String.raw`@   @
+ \ /
+(-.-)
+/(_)\ `,
+String.raw` .-.
+(o o)
+| O |
+'~~~'`,
+String.raw`.---.---.
+( *   * )
+ \ \_/ /
+  '---'`,
+String.raw`\(^o^)/`,
+String.raw`( oOo )
+( \_/ )
+ '---'`,
+String.raw` .^^^.
+( >w< )
+ )   (
+(_/ \_)`
+];
+const INKS = [
+  ["#FFF4DE", 34], ["#FF7C9C", 17], ["#FFDF7E", 15], ["#C4D8FF", 15], ["#DCC6FF", 10], ["#1F3A2B", 9]
+];
+const F = 64, LINE = F * 1.18;
 
-/* it leans toward whoever is looking at it, and lifts a little under the hand */
-const pt = { x:0, y:0, sx:0, sy:0, over:0, hover:0 };
-const ray = new THREE.Raycaster(), ndc = new THREE.Vector2(), hitList = [];
-addEventListener("pointermove", ev => {
-  pt.x = (ev.clientX / innerWidth)  * 2 - 1;
-  pt.y = (ev.clientY / innerHeight) * 2 - 1;
-}, { passive:true });
-
-/* paper is never flat: give every panel a gentle undulation */
-function paperGeo(w, h, shift){
-  const g = new THREE.PlaneGeometry(w, h, 30, 16);
-  const pos = g.attributes.position;
-  for (let i = 0; i < pos.count; i++){
-    const X = pos.getX(i), Y = pos.getY(i);
-    pos.setZ(i, Math.sin(X * 2.2 + 1.1) * .008 + Math.cos(Y * 3.1 + .4) * .005
-                + Math.sin((X + Y) * 1.6) * .0035);
+function critterArt(art, weight, blur){
+  const lines = art.split("\n"), pad = blur ? 44 : 10;
+  const [, m] = canvas(4, 4);
+  m.font = weight + " " + F + "px " + MONO;
+  const w = Math.ceil(Math.max(...lines.map(l => m.measureText(l).width)));
+  const [c, x] = canvas(w + pad * 2, Math.ceil(lines.length * LINE) + pad * 2);
+  x.font = m.font; x.textBaseline = "top";
+  if (blur){
+    x.shadowColor = "#000"; x.shadowBlur = 16; x.shadowOffsetX = 5000;
+    x.fillStyle = "#000";
+    lines.forEach((l, i) => x.fillText(l, pad - 5000, pad + i * LINE));
+  } else {
+    x.fillStyle = "#fff";
+    lines.forEach((l, i) => x.fillText(l, pad, pad + i * LINE));
   }
-  if (shift) g.translate(0, shift, 0);
+  return c;
+}
+
+/* ---- paper that bends --------------------------------------------------------- */
+/* distance s along the sheet past a crease, folded by angle th round radius r:
+   returns [along, lift, local angle]. Negative th folds the other way. */
+function bend(s, th, r){
+  const a = Math.abs(th), sg = th < 0 ? -1 : 1;
+  if (a < 1e-5) return [s, 0, 0];
+  const arc = a * r;
+  if (s <= arc){ const f = s / r; return [r * Math.sin(f), sg * (r - r * Math.cos(f)), sg * f]; }
+  const e = s - arc;
+  return [r * Math.sin(a) + e * Math.cos(a), sg * (r - r * Math.cos(a) + e * Math.sin(a)), sg * a];
+}
+
+/* a grid over arbitrary rows, facing +z */
+function gridGeo(cols, rows, place){
+  const pos = [], uv = [], idx = [];
+  for (let j = 0; j < rows.length; j++){
+    for (let i = 0; i <= cols; i++){
+      const p = place(i / cols, rows[j]);
+      pos.push(p[0], p[1], p[2]); uv.push(p[3], p[4]);
+    }
+  }
+  for (let j = 0; j < rows.length - 1; j++) for (let i = 0; i < cols; i++){
+    const a = j * (cols + 1) + i, b = a + 1, c = a + cols + 1, d = c + 1;
+    idx.push(a, b, d, a, d, c);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
   g.computeVertexNormals();
   return g;
 }
+const steps = (a, b, n) => Array.from({ length: n + 1 }, (_, i) => a + (b - a) * i / n);
+const dense = (list) => [...new Set(list.map(v => +v.toFixed(5)))].sort((p, q) => p - q);
 
-function makePanel(tex, band, shift){
-  const geo = paperGeo(LW, BAND, shift);
-  const map = tex.clone();
-  map.needsUpdate = true;
-  map.repeat.set(1, 1 / 3);
-  map.offset.set(0, band / 3);
-  map.anisotropy = renderer.capabilities.getMaxAnisotropy();
+/* ---- scene -------------------------------------------------------------------- */
+let renderer, scene, camera, maxAniso = 1;
+let env, front, back, flapGeo, letter, letterGeo, envSh, letSh;
+const flat = {}, critters = [];
+let p = 0, vel = 0, dir = 0, idle = 1, last = 0;
+let zEnv = 9, zLet = 6.5;
+const bound = { w: 6, h: 3 };
 
-  const front = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ map, roughness:.94, metalness:0 }));
-  const back  = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color:0xF0EFE9, roughness:.97, metalness:0, side:THREE.BackSide }));
-  front.castShadow = back.castShadow = true;
-  front.receiveShadow = back.receiveShadow = false;
-  const grp = new THREE.Group();
-  grp.add(front, back);
-  return grp;
+const pt = { x:0, y:0, sx:0, sy:0, hover:0, moved:false };
+addEventListener("pointermove", ev => {
+  pt.x = (ev.clientX / innerWidth) * 2 - 1;
+  pt.y = (ev.clientY / innerHeight) * 2 - 1;
+  pt.moved = true;
+}, { passive:true });
+addEventListener("deviceorientation", ev => {
+  if (ev.gamma == null) return;
+  pt.x = clamp(ev.gamma / 28, -1, 1);
+  pt.y = clamp((ev.beta - 45) / 28, -1, 1);
+}, { passive:true });
+
+function texture(c, rx, ry){
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  t.anisotropy = maxAniso;
+  if (rx){ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry || rx); }
+  return t;
 }
+const paperMat = (o) => new THREE.MeshStandardMaterial(Object.assign({ roughness:.92, metalness:0 }, o));
 
 function build(photo){
   renderer = new THREE.WebGLRenderer({ antialias:true, powerPreference:"high-performance" });
   renderer.setPixelRatio(Math.min(2, devicePixelRatio));
   renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.VSMShadowMap;
-  document.body.appendChild(renderer.domElement);
+  maxAniso = renderer.capabilities.getMaxAnisotropy();
+  document.body.prepend(renderer.domElement);
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(GROUND);
+  camera = new THREE.PerspectiveCamera(30, 1, .1, 120);
 
-  camera = new THREE.PerspectiveCamera(32, 1, .1, 100);
-  scene.add(camera);
-
-  scene.add(new THREE.HemisphereLight(0xffffff, 0x6f8a74, .82));
-  const key = new THREE.DirectionalLight(0xfff6e9, 1.55);
-  key.position.set(-2.2, 3.4, 7.0);
-  key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
-  key.shadow.radius = 7;
-  key.shadow.blurSamples = 14;
-  key.shadow.bias = -0.0006;
-  const sc = key.shadow.camera;
-  sc.left = -4; sc.right = 4; sc.top = 4; sc.bottom = -4; sc.near = .5; sc.far = 20;
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x6f8a74, 1.05));
+  const key = new THREE.DirectionalLight(0xfff5e6, 1.25);
+  key.position.set(-2.6, 3.4, 6.5);
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xdfe4ee, .30);
-  fill.position.set(3.6, -1.2, 2.4);
+  const fill = new THREE.DirectionalLight(0xe2e8f2, .32);
+  fill.position.set(3.4, -1.4, 2.6);
   scene.add(fill);
 
-  /* the wall the shadow falls on */
-  const cloth = tartanTex();
-  cloth.repeat.set(40, 40);
-  cloth.anisotropy = renderer.capabilities.getMaxAnisotropy();
-  const wall = new THREE.Mesh(
-    new THREE.PlaneGeometry(70, 70),
-    new THREE.MeshStandardMaterial({ map:cloth, roughness:1, metalness:0 })
-  );
-  wall.position.z = -.55;
-  wall.receiveShadow = true;
+  /* the cloth */
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(90, 90),
+    paperMat({ map: texture(tartan(CLOTH, "rgba(118,150,128,.09)"), 46), roughness:1 }));
+  wall.position.z = WALL;
   scene.add(wall);
 
-  /* -- envelope: a thin box, open along the top -- */
+  const shade = (tex) => new THREE.MeshBasicMaterial({
+    map: tex, color: 0x0d2417, transparent:true, depthWrite:false, opacity:0, toneMapped:false
+  });
+  const rectTex = texture(softRect());
+  envSh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shade(rectTex));
+  letSh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), shade(rectTex));
+  envSh.position.z = WALL + .004; letSh.position.z = WALL + .005;
+  envSh.renderOrder = letSh.renderOrder = -1;
+  scene.add(envSh, letSh);
+
+  /* ---- envelope ---- */
   env = new THREE.Group();
   scene.add(env);
 
-  const stock = { color:0xffffff, roughness:.93, metalness:0 };
-  const side  = new THREE.MeshStandardMaterial({ color:0x6D6C68, roughness:.93, side:THREE.DoubleSide });
-  const none  = new THREE.MeshStandardMaterial({ visible:false });
-  const body = new THREE.Mesh(new THREE.BoxGeometry(EW, EH, ED), [
-    side, side, none, side,
-    new THREE.MeshStandardMaterial(Object.assign({ map: frontTex() }, stock)),
-    new THREE.MeshStandardMaterial(Object.assign({ map: backTex()  }, stock))
-  ]);
-  body.castShadow = true; body.receiveShadow = true;
+  const linerC = tartan(LINER);
+  const puff = (x, y) => {
+    const nx = Math.abs(2 * x / EW), ny = Math.abs(2 * y / EH);
+    return EB * (1 - Math.pow(nx, 12)) * (y < 0 ? 1 - Math.pow(ny, 12) : 1 - .55 * Math.pow(ny, 12));
+  };
+  const rowsE = dense(steps(-EH / 2, EH / 2, 26).concat(steps(EH / 2 - .08, EH / 2, 8)));
+  const panel = (sign) => gridGeo(44, rowsE, (u, y) => {
+    const x = (u - .5) * EW;
+    return [x, y, sign * puff(x, y), u, y / EH + .5];
+  });
+  const linerTex = texture(linerC, 3, 3 * EH / EW);
+  const maskTex = texture(envMask());
+  const frontGeo = panel(1), backGeo = panel(-1);
+  front = new THREE.Mesh(frontGeo, paperMat({ map: texture(envFront()) }));
+  const frontIn = new THREE.Mesh(frontGeo, paperMat({ map: linerTex, side: THREE.BackSide }));
+  back = new THREE.Mesh(backGeo, paperMat({ map: texture(envBack()), side: THREE.BackSide, alphaTest:.5 }));
+  const backIn = new THREE.Mesh(backGeo, paperMat({ map: linerTex, alphaMap: maskTex, alphaTest:.5 }));
+  env.add(front, frontIn, back, backIn);
 
-  /* the flap, hinged along the top edge of the back */
-  const shape = new THREE.Shape();
-  shape.moveTo(-EW / 2, 0); shape.lineTo(EW / 2, 0); shape.lineTo(0, -EH * .60);
-  shape.closePath();
-  const flap = new THREE.Mesh(new THREE.ShapeGeometry(shape),
-    new THREE.MeshStandardMaterial({ color:0x6A6965, roughness:.93, side:THREE.DoubleSide }));
-  flap.castShadow = true; flap.receiveShadow = true;
-  flapPivot = new THREE.Group();
-  flapPivot.position.set(0, EH / 2, -ED / 2 - .006);
-  flapPivot.add(flap);
+  /* the flap: a triangle with a softened point, built to bend at its hinge */
+  const tanA = (EW / 2) / FH, sinA = Math.sin(Math.atan(tanA)), cosA = Math.cos(Math.atan(tanA));
+  const rho = .07, sC = FH - rho / sinA, sT = FH - rho * cosA * cosA / sinA, sTip = sC + rho;
+  const halfW = s => s <= sT ? (EW / 2) * (1 - s / FH) : Math.sqrt(Math.max(0, rho * rho - (s - sC) * (s - sC)));
+  const rowsF = dense(steps(0, sTip, 44).concat(steps(0, .05, 14)).concat(steps(sT, sTip, 8)));
+  flat.flap = rowsF;
+  flapGeo = gridGeo(24, rowsF, (u, s) => {
+    const x = (u * 2 - 1) * halfW(s);
+    return [x, EH / 2 + s, -EB * .45 - .0004, x / EW + .5, s / EW];
+  });
+  flat.flapPos = flapGeo.attributes.position.array.slice();
+  const flapOut = new THREE.Mesh(flapGeo, paperMat({ map: texture(stock(1024, 512)[0]) }));
+  const flapIn  = new THREE.Mesh(flapGeo, paperMat({ map: texture(linerC, 3, 3), side: THREE.BackSide }));
+  env.add(flapOut, flapIn);
 
-  env.add(body, flapPivot);
-  hitList.push(body);
-
-  /* -- letter: three bands on two creases -- */
+  /* ---- the letter: one sheet, two creases ---- */
+  const rowsL = dense(steps(-LH / 2, LH / 2, 140)
+    .concat(steps(-B2 - .03, -B2 + .03, 40)).concat(steps(B2 - .04, B2 + .04, 54)));
+  letterGeo = gridGeo(18, rowsL, (u, y) => [(u - .5) * LW, y, 0, u, y / LH + .5]);
+  const P = letterGeo.attributes.position.array;
+  flat.lx = new Float32Array(P.length / 3); flat.ly = new Float32Array(P.length / 3); flat.lu = new Float32Array(P.length / 3);
+  for (let i = 0; i < flat.lx.length; i++){
+    const x = P[i * 3], y = P[i * 3 + 1];
+    flat.lx[i] = x; flat.ly[i] = y;
+    flat.lu[i] = .0026 * Math.sin(x * 2.3 + 1.1) * Math.cos(y * 1.7) + .0016 * Math.sin((x + y) * 3.1);
+  }
+  const sheetTex = texture(letterSheet(photo));
   letter = new THREE.Group();
+  letter.add(
+    new THREE.Mesh(letterGeo, paperMat({ map: sheetTex, emissiveMap: sheetTex, emissive: 0x3c3c3a, roughness:.9 })),
+    new THREE.Mesh(letterGeo, paperMat({ color:0xEEECE5, emissive: 0x2e2e2c, roughness:.95, side:THREE.BackSide }))
+  );
   scene.add(letter);
 
-  const tex = letterTex(photo);
-  const mid = makePanel(tex, 1, 0);
-  topPivot = new THREE.Group();
-  topPivot.position.set(0, BAND / 2, .018);
-  topPivot.add(makePanel(tex, 2, BAND / 2));
-  botPivot = new THREE.Group();
-  botPivot.position.set(0, -BAND / 2, .009);
-  botPivot.add(makePanel(tex, 0, -BAND / 2));
-  letter.add(mid, topPivot, botPivot);
-  hitList.push(letter);
+  /* ---- creatures, between the cloth and the envelope ---- */
+  const arts = {};
+  const artFor = (i, bold) => {
+    const key = i + (bold ? "b" : "r");
+    if (!arts[key]) arts[key] = {
+      sharp: critterArt(CRITTERS[i], bold ? 700 : 400, false),
+      soft:  critterArt(CRITTERS[i], bold ? 700 : 400, true)
+    };
+    return arts[key];
+  };
+  const texCache = new Map();
+  const texOf = c => { if (!texCache.has(c)) texCache.set(c, texture(c)); return texCache.get(c); };
+  const inkTotal = INKS.reduce((a, k) => a + k[1], 0);
+  const pickInk = r => { let a = r * inkTotal; for (const [c, w] of INKS){ if ((a -= w) <= 0) return c; } return INKS[0][0]; };
+
+  const N = 30;
+  for (let i = 0; i < N; i++){
+    const rnd = k => { const v = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453; return v - Math.floor(v); };
+    const heavy = rnd(1), bold = rnd(2) < .62;
+    const art = artFor(i % CRITTERS.length, bold);
+    const mat = new THREE.MeshBasicMaterial({
+      map: texOf(art.sharp), color: pickInk(rnd(3)), transparent:true, depthWrite:false,
+      side:THREE.DoubleSide, toneMapped:false, opacity: mix(.9, 1, rnd(4))
+    });
+    const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
+    const sh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), new THREE.MeshBasicMaterial({
+      map: texOf(art.soft), color:0x0b1f14, transparent:true, depthWrite:false, toneMapped:false, opacity:.3
+    }));
+    sh.renderOrder = -1;
+    scene.add(mesh, sh);
+    critters.push({
+      mesh, sh, art,
+      nx: ((i * .618034) % 1) * 2 - 1 + (rnd(5) - .5) * .12,
+      ny: ((i * .7548777 + .31) % 1) * 2.2 - 1.1,
+      z: mix(-.54, -.1, rnd(6)),
+      size: mix(.72, 1.38, heavy),
+      speed: mix(.085, .026, heavy),          /* the heavy ones take their time */
+      tilt: mix(.5, .22, heavy),
+      swA: mix(.05, .16, rnd(7)), sw: mix(.18, .42, rnd(8)), ph: rnd(9) * 6.28,
+      rz: (rnd(10) - .5) * .5
+    });
+  }
 
   fit();
   addEventListener("resize", fit, { passive:true });
   renderer.setAnimationLoop(tick);
 }
 
-/* camera: back far enough for the envelope, then closes in on the letter */
-let zEnv = 8, zLet = 6;
 function fit(){
   const w = innerWidth, h = innerHeight;
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
-  const k = 2 * Math.tan((camera.fov * Math.PI / 180) / 2);
-  zEnv = Math.max(EH * 3.9, (EW * 2.3) / camera.aspect) / k;
-  zLet = Math.max(LH * 1.16, (LW * 1.16) / camera.aspect) / k + 1.15;
+  const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2);
+  /* portrait screens hold the envelope a little larger, so the dolly to the
+     letter (and the cloth behind it) magnifies about as much as on desktop */
+  zEnv = Math.max(EH * 3.9, EW * (camera.aspect < 1 ? 1.8 : 2.35) / camera.aspect) / k;
+  zLet = Math.max(LH * 1.13, LW * 1.13 / camera.aspect) / k + 1.2;
+  bound.h = (zEnv - WALL) * k / 2 * 1.14;
+  bound.w = bound.h * camera.aspect * 1.04;
+  const visH = (zEnv - WALL) * k, visW = visH * camera.aspect;
+  const scale = Math.min(visH, visW * 1.3) / 5.1;
+  for (const c of critters){
+    const ppu = .118 * c.size * scale / LINE;
+    c.mesh.scale.set(c.art.sharp.width * ppu, c.art.sharp.height * ppu, 1);
+    const grow = 1 + (c.z - WALL) * .5;
+    c.sh.scale.set(c.art.soft.width * ppu * grow, c.art.soft.height * ppu * grow, 1);
+    c.sh.material.opacity = .34 * (1 - (c.z - WALL) * .7);
+  }
+}
+
+/* ---- per-frame shaping ----------------------------------------------------------- */
+let lastTop = -1, lastBot = -1, lastFlap = -9;
+function shapeLetter(tt, tb){
+  if (tt === lastTop && tb === lastBot) return;
+  lastTop = tt; lastBot = tb;
+  const P = letterGeo.attributes.position.array;
+  const openT = 1 - tt / Math.PI, openB = 1 - tb / Math.PI, openM = Math.min(openT, openB);
+  for (let i = 0; i < flat.lx.length; i++){
+    const x = flat.lx[i], y = flat.ly[i];
+    const u = flat.lu[i] * (y > B2 ? openT : y < -B2 ? openB : openM);
+    let Y = y, Z = 0, ny = 0, nz = 1;
+    if (y > B2){
+      const r = bend(y - B2, tt, RT);
+      Y = B2 + r[0]; Z = r[1]; ny = -Math.sin(r[2]); nz = Math.cos(r[2]);
+    } else if (y < -B2){
+      const r = bend(-B2 - y, tb, RB);
+      Y = -B2 - r[0]; Z = r[1]; ny = Math.sin(r[2]); nz = Math.cos(r[2]);
+    }
+    P[i * 3] = x; P[i * 3 + 1] = Y + ny * u; P[i * 3 + 2] = Z + nz * u;
+  }
+  letterGeo.attributes.position.needsUpdate = true;
+  letterGeo.computeVertexNormals();
+  letterGeo.computeBoundingBox();
+  letterGeo.computeBoundingSphere();
+}
+function shapeFlap(th){
+  if (th === lastFlap) return;
+  lastFlap = th;
+  const P = flapGeo.attributes.position.array, F0 = flat.flapPos;
+  for (let i = 0; i < F0.length; i += 3){
+    const s = F0[i + 1] - EH / 2;
+    const r = bend(s, th, RF);
+    P[i] = F0[i]; P[i + 1] = EH / 2 + r[0]; P[i + 2] = F0[i + 2] - r[1];
+  }
+  flapGeo.attributes.position.needsUpdate = true;
+  flapGeo.computeVertexNormals();
+  flapGeo.computeBoundingSphere();
 }
 
 const qFlip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI);
-const qIn = new THREE.Quaternion(), qOut = new THREE.Quaternion();
-const eOut = new THREE.Euler();
-const vIn = new THREE.Vector3(), vOut = new THREE.Vector3();
+const qIn = new THREE.Quaternion(), qOut = new THREE.Quaternion(), eOut = new THREE.Euler();
+const vIn = new THREE.Vector3(), vOut = new THREE.Vector3(), throat = new THREE.Vector3();
+const box = new THREE.Box3();
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
 
-function frame(){
-  /* 1 straighten  2 turn over  3 flap  4 slide out  5 come forward  6,7 unfold */
-  const straighten = seg(p, .00, .15);
-  const flip       = seg(p, .10, .33);
-  const flap       = seg(p, .31, .45);
-  const rise       = seg(p, .43, .63);
-  const travel     = seg(p, .60, .76);
-  const openTop    = seg(p, .72, .88);
-  const openBot    = seg(p, .84, 1.0);
-
-  const idle = started ? 0 : 1;
-  const t = performance.now() / 1000;
-  const k = 1 - Math.pow(.935, dtFrames);           /* same feel at any frame rate */
+function frame(t, dt){
+  const k = 1 - Math.pow(.925, dt * 60);
   pt.sx += (pt.x - pt.sx) * k;
   pt.sy += (pt.y - pt.sy) * k;
-  ndc.set(pt.x, -pt.y);
-  ray.setFromCamera(ndc, camera);
-  pt.over = ray.intersectObjects(hitList, true).length ? 1 : 0;
-  pt.hover += (pt.over - pt.hover) * k;
-  document.body.style.cursor = pt.over ? "pointer" : "";
+
+  /* the timeline eases its own speed, so reversing mid-way never jerks */
+  vel += (dir - vel) * (1 - Math.pow(.88, dt * 60));
+  p = clamp(p + vel * dt / DUR, 0, 1);
+  if ((p === 1 && dir > 0) || (p === 0 && dir < 0)){ vel = 0; dir = 0; }
+  idle += ((p < .001 && dir <= 0 ? 1 : 0) - idle) * k;
+
+  const lift   = seg(p, .00, .17);
+  const flip   = seg(p, .10, .31);
+  const flap   = seg(p, .29, .42);
+  const rise   = seg(p, .38, .57);
+  const travel = seg(p, .54, .72);
+  const uTop   = seg(p, .68, .85);
+  const uBot   = seg(p, .80, 1.0);
+
+  /* hover: only the paper itself */
+  if (pt.moved){
+    pt.moved = false;
+    ndc.set(pt.x, -pt.y);
+    ray.setFromCamera(ndc, camera);
+    pt.over = ray.intersectObjects([front, back, letter], true).length > 0;
+    document.body.style.cursor = pt.over ? "pointer" : "";
+  }
+  pt.hover += ((pt.over ? 1 : 0) - pt.hover) * k;
 
   /* the envelope */
-  const lean = 1 - flip;                               /* lets go once it turns */
-  env.rotation.z = mix(-.075, 0, straighten) + idle * Math.sin(t * .7) * .012;
-  env.rotation.y = flip * Math.PI + pt.sx * .20 * lean;
-  env.rotation.x = mix(.06, 0, straighten) - pt.sy * .15 * lean;
-  env.position.set(0, mix(0, -5.2, travel) + idle * Math.sin(t * .9) * .035,
-                   mix(0, -.25, travel) + pt.hover * .09 * lean);
-  flapPivot.rotation.x = -flap * 2.45;
-  env.updateMatrixWorld();
+  const lean = 1 - flip, turn = Math.sin(Math.PI * flip);
+  env.position.set(
+    0,
+    turn * .06 + mix(0, -6.4, travel) + idle * Math.sin(t * .9) * .035,
+    mix(0, 1.1, lift) + mix(0, -.55, travel) + pt.hover * .07 * lean
+  );
+  env.rotation.set(
+    mix(.06, 0, lift) - turn * .1 - pt.sy * .14 * lean + mix(0, .4, travel),
+    flip * Math.PI + pt.sx * .18 * lean,
+    mix(-.075, 0, lift) + idle * Math.sin(t * .7) * .012
+  );
+  env.updateMatrixWorld(true);
+  shapeFlap(mix(Math.PI, -1.15, flap));
 
-  /* the letter rides inside the envelope, then comes forward on its own */
-  vIn.set(0, mix(-.06, 1.46, rise), -.006).applyMatrix4(env.matrixWorld);
+  /* the letter rides in the pocket, slides out of the throat, then comes to you */
+  const liftY = mix(-.06, 1.34, rise);
+  const clear = clamp((liftY - (EH / 2 + B2 + .02)) / .26, 0, 1);
+  vIn.set(0, liftY, mix(.006, -.075, clear)).applyMatrix4(env.matrixWorld);
   qIn.copy(env.quaternion).multiply(qFlip);
-  vOut.set(0, Math.sin(t * .8) * .012 * openBot, 1.15 + pt.hover * .04 * openBot);
-  eOut.set(-pt.sy * .19, pt.sx * .26, pt.sx * .035);
+  eOut.set(-pt.sy * .17, pt.sx * .22, pt.sx * .03);
   qOut.setFromEuler(eOut);
+  vOut.set(0, Math.sin(t * .8) * .012 * uBot, 1.2 + pt.hover * .03 * uBot);
   letter.position.lerpVectors(vIn, vOut, travel);
   letter.quaternion.slerpQuaternions(qIn, qOut, travel);
+  shapeLetter(mix(Math.PI, .075, uTop), mix(Math.PI, .055, uBot));
+  letter.updateMatrixWorld(true);
 
-  /* folded flat, then opening on the creases, keeping a little of the fold */
-  topPivot.rotation.x = mix(-Math.PI * .995, -.055, openTop);
-  botPivot.rotation.x = mix( Math.PI * .995,  .055, openBot);
+  /* until the back faces you, the letter is just a thing inside an envelope */
+  letter.visible = flip > .6;
+  throat.set(0, EH / 2, 0).applyMatrix4(env.matrixWorld);
+
+  /* shadows on the cloth */
+  const he = env.position.z - WALL, ge = 1 + he * .1;
+  envSh.position.set(env.position.x + he * LX, env.position.y + he * LY, WALL + .004);
+  envSh.rotation.z = env.rotation.z;
+  envSh.scale.set(2 * EW * Math.max(.04, Math.abs(Math.cos(env.rotation.y))) * ge,
+                  2 * EH * Math.max(.25, Math.cos(env.rotation.x)) * ge, 1);
+  envSh.material.opacity = .62 / (1 + he * 1.1);
+
+  if (letter.visible){
+    box.copy(letterGeo.boundingBox).applyMatrix4(letter.matrixWorld);
+    if (travel < .001) box.min.y = Math.max(box.min.y, throat.y - EH * .3);
+    const hl = (box.min.z + box.max.z) / 2 - WALL, gl = 1 + hl * .1;
+    letSh.position.set((box.min.x + box.max.x) / 2 + hl * LX, (box.min.y + box.max.y) / 2 + hl * LY, WALL + .005);
+    letSh.scale.set(2 * (box.max.x - box.min.x) * gl, 2 * Math.max(.001, box.max.y - box.min.y) * gl, 1);
+    letSh.material.opacity = .55 / (1 + hl * 1.1) * clamp(rise * 2.5, 0, 1);
+  } else letSh.material.opacity = 0;
+
+  /* creatures drift up, lean with the letter, and wrap round */
+  for (const c of critters){
+    c.ny += c.speed * dt;
+    if (c.ny > 1.12){ c.ny -= 2.24; }
+    const x = c.nx * bound.w + Math.sin(t * c.sw + c.ph) * c.swA, y = c.ny * bound.h;
+    c.mesh.position.set(x, y, c.z);
+    c.mesh.rotation.set(-pt.sy * c.tilt + Math.sin(t * .5 + c.ph) * .05,
+                         pt.sx * c.tilt + Math.cos(t * .4 + c.ph) * .05,
+                         c.rz + Math.sin(t * .3 + c.ph) * .08);
+    const hc = c.z - WALL;
+    c.sh.position.set(x + hc * LX, y + hc * LY, WALL + .002);
+    c.sh.rotation.z = c.mesh.rotation.z;
+  }
 
   camera.position.set(0, 0, mix(zEnv, zLet, travel));
   camera.lookAt(0, 0, 0);
 }
 
-let dtFrames = 1;
 function tick(now){
-  const dt = last ? Math.min(.05, (now - last) / 1000) : 0;
+  const dt = last ? Math.min(.05, (now - last) / 1000) : 1 / 60;
   last = now;
-  dtFrames = dt * 60;
-  if (dir) p = Math.min(1, Math.max(0, p + dir * dt / DUR));
-  frame();
+  frame(now / 1000, dt);
   renderer.render(scene, camera);
 }
 
-/* ---- go --------------------------------------------------------------------- */
-function open(){
-  if (!started){ started = true; document.body.classList.add("went"); }
-  dir = (dir === 1 || p === 1) ? -1 : 1;
-  if (reduced){ p = dir === 1 ? 1 : 0; }
+/* ---- go ----------------------------------------------------------------------- */
+function toggle(){
+  const forward = !(dir > 0 || (dir === 0 && p > .5));
+  dir = forward ? 1 : -1;
+  if (reduced){ p = forward ? 1 : 0; vel = 0; dir = 0; }
 }
-addEventListener("pointerdown", open);
+addEventListener("pointerdown", ev => { if (ev.button === 0 || ev.pointerType !== "mouse") toggle(); });
 addEventListener("keydown", ev => {
-  if (ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); open(); }
+  if (ev.key === "Enter" || ev.key === " "){ ev.preventDefault(); toggle(); }
 });
 
-/* ---- start: wait for the photo and the font, then build --------------------- */
 function boot(){
-  if (!window.THREE || !document.createElement("canvas").getContext("webgl")){
-    document.body.classList.add("plain-on");
-    return;
-  }
+  const gl = document.createElement("canvas").getContext("webgl2") || document.createElement("canvas").getContext("webgl");
+  if (!window.THREE || !gl){ document.body.classList.add("plain-on"); return; }
   const img = new Image();
   img.onload  = () => build(img);
   img.onerror = () => build(null);
